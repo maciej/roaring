@@ -43,15 +43,10 @@ func (aggregator ParAggregator) worker() {
 			resultContainer = task.left.and(task.right)
 		}
 
-		result := parResult{
-			key: task.key,
-			pos: task.pos,
-		}
-
-		if resultContainer.getCardinality() > 0 {
-			result.container = resultContainer
-		} else {
-			result.empty = true
+		result := parContainer{
+			key:       task.key,
+			idx:       task.idx,
+			container: resultContainer,
 		}
 
 		task.result <- result
@@ -65,16 +60,15 @@ func (aggregator ParAggregator) Shutdown() {
 type parTask struct {
 	op          parOp
 	key         uint16
-	pos         int
+	idx         int
 	left, right container
-	result      chan<- parResult
+	result      chan<- parContainer
 }
 
-type parResult struct {
+type parContainer struct {
 	key       uint16
-	pos       int
+	idx       int
 	container container
-	empty     bool
 }
 
 // TODO add tests
@@ -141,26 +135,22 @@ func determineOutputContainerCount(x1, x2 *Bitmap, operation parOp) uint16 {
 	return count
 }
 
-func (aggregator ParAggregator) walkBitmapPair()
+//func (aggregator ParAggregator) walkBitmapPair()
+
+//func receiveContainers(containerChan <-chan parContainer, containerCount uint16) chan *Bitmap {
+//
+//}
 
 func (aggregator ParAggregator) And(x1, x2 *Bitmap) *Bitmap {
-	answer := NewBitmap()
+
 	pos1 := 0
 	pos2 := 0
 	length1 := x1.highlowcontainer.size()
 	length2 := x2.highlowcontainer.size()
 
-	var chanLength int
-	// take smaller of two input bitmap lengths
-	// this makes the buffer large enough not to block the workers
-	if length1 > length2 {
-		chanLength = length2
-	} else {
-		chanLength = length1
-	}
-
-	resultChan := make(chan parResult, chanLength)
-	resultCount := 0
+	containerIdx := 0
+	containerCount := determineOutputContainerCount(x1, x2, parOpAnd)
+	containerChan := make(chan parContainer, containerCount)
 
 main:
 	for pos1 < length1 && pos2 < length2 {
@@ -173,13 +163,14 @@ main:
 
 				aggregator.taskQueue <- parTask{
 					op:     parOpAnd,
-					pos:    resultCount,
 					left:   left,
 					right:  right,
-					result: resultChan,
+					key:    s1,
+					idx:    containerIdx,
+					result: containerChan,
 				}
-				resultCount++
 
+				containerIdx++
 				pos1++
 				pos2++
 				if (pos1 == length1) || (pos2 == length2) {
@@ -204,22 +195,7 @@ main:
 	}
 	// main loop end
 
-	results := make([]parResult, resultCount)
+	// TODO receive containers
 
-	for result := range resultChan {
-		results[result.pos] = result
-		resultCount--
-		if resultCount == 0 {
-			close(resultChan)
-			break
-		}
-	}
-
-	for _, result := range results {
-		if !result.empty {
-			answer.highlowcontainer.appendContainer(result.key, result.container, false)
-		}
-	}
-
-	return answer
+	return NewBitmap()
 }
