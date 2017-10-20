@@ -6,163 +6,7 @@ import (
 	"runtime"
 )
 
-type parOp int
-
-const (
-	parOpAnd parOp = iota
-	parOpOr
-	parOpXor
-	parOpAndNot
-)
-
 var defaultWorkerCount int = runtime.NumCPU()
-
-const defaultTaskQueueLength = 4096
-
-type ParAggregator struct {
-	taskQueue chan parTask
-}
-
-func NewParAggregator(taskQueueLength, workerCount int) ParAggregator {
-	agg := ParAggregator{
-		make(chan parTask, taskQueueLength),
-	}
-
-	for i := 0; i < workerCount; i++ {
-		go agg.worker()
-	}
-
-	return agg
-}
-
-func NewParAggregatorWithDefaults() ParAggregator {
-	return NewParAggregator(defaultTaskQueueLength, defaultWorkerCount)
-}
-
-func (aggregator ParAggregator) worker() {
-	for task := range aggregator.taskQueue {
-		var resultContainer container
-		switch task.op {
-		case parOpAnd:
-			resultContainer = task.left.and(task.right)
-		}
-
-		result := parResult{
-			key: task.key,
-			pos: task.pos,
-		}
-
-		if resultContainer.getCardinality() > 0 {
-			result.container = resultContainer
-		} else {
-			result.empty = true
-		}
-
-		task.result <- result
-	}
-}
-
-func (aggregator ParAggregator) Shutdown() {
-	close(aggregator.taskQueue)
-}
-
-type parTask struct {
-	op          parOp
-	key         uint16
-	pos         int
-	left, right container
-	result      chan<- parResult
-}
-
-type parResult struct {
-	key       uint16
-	pos       int
-	container container
-	empty     bool
-}
-
-func (aggregator ParAggregator) And(x1, x2 *Bitmap) *Bitmap {
-	answer := NewBitmap()
-	pos1 := 0
-	pos2 := 0
-	length1 := x1.highlowcontainer.size()
-	length2 := x2.highlowcontainer.size()
-
-	var chanLength int
-	// take smaller of two input bitmap lengths
-	// this makes the buffer large enough not to block the workers
-	if length1 > length2 {
-		chanLength = length2
-	} else {
-		chanLength = length1
-	}
-
-	resultChan := make(chan parResult, chanLength)
-	resultCount := 0
-
-main:
-	for pos1 < length1 && pos2 < length2 {
-		s1 := x1.highlowcontainer.getKeyAtIndex(pos1)
-		s2 := x2.highlowcontainer.getKeyAtIndex(pos2)
-		for {
-			if s1 == s2 {
-				left := x1.highlowcontainer.getContainerAtIndex(pos1)
-				right := x2.highlowcontainer.getContainerAtIndex(pos2)
-
-				aggregator.taskQueue <- parTask{
-					op:     parOpAnd,
-					pos:    resultCount,
-					left:   left,
-					right:  right,
-					result: resultChan,
-				}
-				resultCount++
-
-				pos1++
-				pos2++
-				if (pos1 == length1) || (pos2 == length2) {
-					break main
-				}
-				s1 = x1.highlowcontainer.getKeyAtIndex(pos1)
-				s2 = x2.highlowcontainer.getKeyAtIndex(pos2)
-			} else if s1 < s2 {
-				pos1 = x1.highlowcontainer.advanceUntil(s2, pos1)
-				if pos1 == length1 {
-					break main
-				}
-				s1 = x1.highlowcontainer.getKeyAtIndex(pos1)
-			} else { // s1 > s2
-				pos2 = x2.highlowcontainer.advanceUntil(s1, pos2)
-				if pos2 == length2 {
-					break main
-				}
-				s2 = x2.highlowcontainer.getKeyAtIndex(pos2)
-			}
-		}
-	}
-	// main loop end
-
-	results := make([]parResult, resultCount)
-
-	for result := range resultChan {
-		results[result.pos] = result
-		resultCount--
-		if resultCount == 0 {
-			close(resultChan)
-			break
-		}
-	}
-
-	for _, result := range results {
-		if !result.empty {
-			answer.highlowcontainer.appendContainer(result.key, result.container, false)
-		}
-	}
-
-	return answer
-}
-
-// Wide-or code
 
 type bitmapContainerKey struct {
 	bitmap    *Bitmap
@@ -185,14 +29,9 @@ type keyedContainer struct {
 
 type bitmapContainerHeap []bitmapContainerKey
 
-func (h bitmapContainerHeap) Len() int { return len(h) }
-func (h bitmapContainerHeap) Less(i, j int) bool {
-	// TODO consider container type to comparison
-	// we'd prefer bitmap containers to be considered less
-	// that will avoid conversions
-	return h[i].key < h[j].key
-}
-func (h bitmapContainerHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
+func (h bitmapContainerHeap) Len() int           { return len(h) }
+func (h bitmapContainerHeap) Less(i, j int) bool { return h[i].key < h[j].key }
+func (h bitmapContainerHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
 
 func (h *bitmapContainerHeap) Push(x interface{}) {
 	// Push and Pop use pointer receivers because they modify the slice's length,
@@ -219,7 +58,7 @@ func (h *bitmapContainerHeap) PopIncrementing() bitmapContainerKey {
 	if newIdx < k.bitmap.highlowcontainer.size() {
 		newKey := bitmapContainerKey{
 			k.bitmap,
-			k.bitmap.highlowcontainer.containers[newIdx],
+			k.bitmap.highlowcontainer.getWritableContainerAtIndex(newIdx),
 			k.bitmap.highlowcontainer.keys[newIdx],
 			newIdx,
 		}
@@ -260,7 +99,7 @@ func newBitmapContainerHeap(bitmaps ...*Bitmap) bitmapContainerHeap {
 		if !bitmap.IsEmpty() {
 			key := bitmapContainerKey{
 				bitmap,
-				bitmap.highlowcontainer.containers[0],
+				bitmap.highlowcontainer.getWritableContainerAtIndex(0),
 				bitmap.highlowcontainer.keys[0],
 				0,
 			}
@@ -328,7 +167,6 @@ func horizontalOr(bitmaps ...*Bitmap) *Bitmap {
 }
 
 func appenderRoutine(bitmapChan chan<- *Bitmap, resultChan <-chan keyedContainer, expectedKeysChan <-chan int) {
-
 	expectedKeys := -1
 	appendedKeys := 0
 	keys := make([]uint16, 0)
@@ -374,9 +212,9 @@ func ParOr(bitmaps ...*Bitmap) *Bitmap {
 
 	orFunc := func() {
 		for input := range inputChan {
-			c := toBitmapContainer(input.containers[0])
-			for _, next := range input.containers[1:] {
-				c.lazyIOR(next)
+			c := toBitmapContainer(input.containers[0]).lazyOR(input.containers[1])
+			for _, next := range input.containers[2:] {
+				c = c.lazyIOR(next)
 			}
 			c = repairAfterLazy(c)
 			kx := keyedContainer{
@@ -421,6 +259,8 @@ func ParOr(bitmaps ...*Bitmap) *Bitmap {
 }
 
 func ParAnd(bitmaps ...*Bitmap) *Bitmap {
+	bitmapCount := len(bitmaps)
+
 	h := newBitmapContainerHeap(bitmaps...)
 
 	bitmapChan := make(chan *Bitmap)
@@ -430,9 +270,9 @@ func ParAnd(bitmaps ...*Bitmap) *Bitmap {
 
 	andFunc := func() {
 		for input := range inputChan {
-			c := input.containers[0]
-			for _, next := range input.containers[1:] {
-				c.and(next)
+			c := input.containers[0].and(input.containers[1])
+			for _, next := range input.containers[2:] {
+				c = c.iand(next)
 			}
 			kx := keyedContainer{
 				input.key,
@@ -452,7 +292,7 @@ func ParAnd(bitmaps ...*Bitmap) *Bitmap {
 	idx := 0
 	for h.Len() > 0 {
 		ck := h.PopNextContainers()
-		if len(ck.containers) > 1 {
+		if len(ck.containers) == bitmapCount {
 			ck.idx = idx
 			inputChan <- ck
 			idx++

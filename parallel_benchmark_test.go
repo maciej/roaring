@@ -5,24 +5,8 @@ import (
 	"testing"
 )
 
-func TestParAnd(t *testing.T) {
-	parAggregator := NewParAggregatorWithDefaults()
-	defer parAggregator.Shutdown()
-
-	left := BitmapOf(1, 2)
-	right := BitmapOf(1)
-	result := parAggregator.And(left, right)
-
-	if !result.Equals(right) {
-		t.Errorf("Result bitmap differs from expected: %v != %v", left, right)
-	}
-}
-
-func BenchmarkIntersectionSparseParallel(b *testing.B) {
+func BenchmarkIntersectionLargeParallel(b *testing.B) {
 	b.StopTimer()
-
-	parAggregator := NewParAggregatorWithDefaults()
-	defer parAggregator.Shutdown()
 
 	initsize := 650000
 	r := rand.New(rand.NewSource(0))
@@ -42,12 +26,12 @@ func BenchmarkIntersectionSparseParallel(b *testing.B) {
 	b.StartTimer()
 	card := uint64(0)
 	for j := 0; j < b.N; j++ {
-		s3 := parAggregator.And(s1, s2)
+		s3 := ParAnd(s1, s2)
 		card = card + s3.GetCardinality()
 	}
 }
 
-func BenchmarkIntersectionSparseRoaring(b *testing.B) {
+func BenchmarkIntersectionLargeRoaring(b *testing.B) {
 	b.StopTimer()
 	initsize := 650000
 	r := rand.New(rand.NewSource(0))
