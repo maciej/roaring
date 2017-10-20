@@ -302,7 +302,7 @@ func toBitmapContainer(c container) container {
 	return c
 }
 
-func HorizontalOr(bitmaps ...*Bitmap) *Bitmap {
+func horizontalOr(bitmaps ...*Bitmap) *Bitmap {
 	h := newBitmapContainerHeap(bitmaps...)
 	answer := New()
 
@@ -325,6 +325,43 @@ func HorizontalOr(bitmaps ...*Bitmap) *Bitmap {
 	}
 
 	return answer
+}
+
+func appenderRoutine(bitmapChan chan<- *Bitmap, resultChan <-chan keyedContainer, expectedKeysChan <-chan int) {
+
+	expectedKeys := -1
+	appendedKeys := 0
+	keys := make([]uint16, 0)
+	containers := make([]container, 0)
+	for appendedKeys != expectedKeys {
+		select {
+		case item := <-resultChan:
+			if len(keys) <= item.idx {
+				keys = append(keys, make([]uint16, item.idx-len(keys)+1)...)
+				containers = append(containers, make([]container, item.idx-len(containers)+1)...)
+			}
+			keys[item.idx] = item.key
+			containers[item.idx] = item.container
+
+			appendedKeys += 1
+		case msg := <-expectedKeysChan:
+			expectedKeys = msg
+		}
+	}
+	answer := &Bitmap{
+		roaringArray{
+			make([]uint16, 0, expectedKeys),
+			make([]container, 0, expectedKeys),
+			make([]bool, 0, expectedKeys),
+			false,
+			nil,
+		},
+	}
+	for i := range keys {
+		answer.highlowcontainer.appendContainer(keys[i], containers[i], false)
+	}
+
+	bitmapChan <- answer
 }
 
 func ParOr(bitmaps ...*Bitmap) *Bitmap {
@@ -351,43 +388,7 @@ func ParOr(bitmaps ...*Bitmap) *Bitmap {
 		}
 	}
 
-	appenderFun := func() {
-		expectedKeys := -1
-		appendedKeys := 0
-		keys := make([]uint16, 0)
-		containers := make([]container, 0)
-		for appendedKeys != expectedKeys {
-			select {
-			case item := <-resultChan:
-				if len(keys) <= item.idx {
-					keys = append(keys, make([]uint16, item.idx-len(keys)+1)...)
-					containers = append(containers, make([]container, item.idx-len(containers)+1)...)
-				}
-				keys[item.idx] = item.key
-				containers[item.idx] = item.container
-
-				appendedKeys += 1
-			case msg := <-expectedKeysChan:
-				expectedKeys = msg
-			}
-		}
-		answer := &Bitmap{
-			roaringArray{
-				make([]uint16, 0, expectedKeys),
-				make([]container, 0, expectedKeys),
-				make([]bool, 0, expectedKeys),
-				false,
-				nil,
-			},
-		}
-		for i := range keys {
-			answer.highlowcontainer.appendContainer(keys[i], containers[i], false)
-		}
-
-		bitmapChan <- answer
-	}
-
-	go appenderFun()
+	go appenderRoutine(bitmapChan, resultChan, expectedKeysChan)
 
 	for i := 0; i < defaultWorkerCount; i++ {
 		go orFunc()
@@ -407,6 +408,55 @@ func ParOr(bitmaps ...*Bitmap) *Bitmap {
 			inputChan <- ck
 		}
 		idx++
+	}
+	expectedKeysChan <- idx
+
+	bitmap := <-bitmapChan
+
+	close(inputChan)
+	close(resultChan)
+	close(expectedKeysChan)
+
+	return bitmap
+}
+
+func ParAnd(bitmaps ...*Bitmap) *Bitmap {
+	h := newBitmapContainerHeap(bitmaps...)
+
+	bitmapChan := make(chan *Bitmap)
+	inputChan := make(chan multipleContainers, 128)
+	resultChan := make(chan keyedContainer, 32)
+	expectedKeysChan := make(chan int)
+
+	andFunc := func() {
+		for input := range inputChan {
+			c := input.containers[0]
+			for _, next := range input.containers[1:] {
+				c.and(next)
+			}
+			kx := keyedContainer{
+				input.key,
+				c,
+				input.idx,
+			}
+			resultChan <- kx
+		}
+	}
+
+	go appenderRoutine(bitmapChan, resultChan, expectedKeysChan)
+
+	for i := 0; i < defaultWorkerCount; i++ {
+		go andFunc()
+	}
+
+	idx := 0
+	for h.Len() > 0 {
+		ck := h.PopNextContainers()
+		if len(ck.containers) > 1 {
+			ck.idx = idx
+			inputChan <- ck
+			idx++
+		}
 	}
 	expectedKeysChan <- idx
 
