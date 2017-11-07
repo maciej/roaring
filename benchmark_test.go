@@ -568,6 +568,8 @@ func BenchmarkBitmapOf(b *testing.B) {
 		for n := 0; n < b.N; n++ {
 			bm = BitmapOf(rrs...)
 		}
+		b.StopTimer()
+
 		cardBaseline = bm.GetCardinality()
 	})
 
@@ -576,6 +578,8 @@ func BenchmarkBitmapOf(b *testing.B) {
 		for n := 0; n < b.N; n++ {
 			bm = BitmapOfSequentialDense(rrs...)
 		}
+		b.StopTimer()
+
 		cardDense = bm.GetCardinality()
 	})
 
@@ -584,6 +588,7 @@ func BenchmarkBitmapOf(b *testing.B) {
 		for n := 0; n < b.N; n++ {
 			bm = BitmapOfSequentialSparse(rrs...)
 		}
+		b.StopTimer()
 
 		cardSparse = bm.GetCardinality()
 	})
