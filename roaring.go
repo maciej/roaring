@@ -1022,6 +1022,14 @@ func BitmapOfSequentialDense(dat ...uint32) *Bitmap {
 
 func BitmapOfSequentialSparse(dat ...uint32) *Bitmap {
 	rb := New()
+	//sizeHint := 2048
+	//rb := Bitmap{
+	//	roaringArray{
+	//		keys:            make([]uint16, 0, sizeHint),
+	//		containers:      make([]container, 0, sizeHint),
+	//		needCopyOnWrite: make([]bool, 0, sizeHint),
+	//	},
+	//}
 
 	c := make([]uint16, maxCapacity)
 	key := highbits(dat[0])
@@ -1030,13 +1038,15 @@ func BitmapOfSequentialSparse(dat ...uint32) *Bitmap {
 	for _, x := range dat[1:] {
 		hb := highbits(x)
 		lb := lowbits(x)
+
 		if hb != key {
-			var nc container = &arrayContainer{c[:card]}
+			cc := make([]uint16, card)
+			copy(cc, c)
+			var nc container = &arrayContainer{cc}
 			if card > arrayDefaultMaxSize {
 				nc = nc.(*arrayContainer).toBitmapContainer()
-			} else {
-				nc = nc.clone()
 			}
+
 			rb.highlowcontainer.appendContainer(key, nc, false)
 			// clear bits
 			// go should optimize it to a memset: https://codereview.appspot.com/137880043
@@ -1047,15 +1057,16 @@ func BitmapOfSequentialSparse(dat ...uint32) *Bitmap {
 			card = 0
 			key = hb
 		}
+
 		c[card] = lb
 		card++
 	}
 
-	var nc container = &arrayContainer{c[:card:card]}
+	var lc container = &arrayContainer{c[:card:card]}
 	if card > arrayDefaultMaxSize {
-		nc = nc.(*arrayContainer).toBitmapContainer()
+		lc = lc.(*arrayContainer).toBitmapContainer()
 	}
-	rb.highlowcontainer.appendContainer(key, nc, false)
+	rb.highlowcontainer.appendContainer(key, lc, false)
 
 	return rb
 }
