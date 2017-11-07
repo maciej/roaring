@@ -977,15 +977,20 @@ func BitmapOfSequentialDense(dat ...uint32) *Bitmap {
 	rb := New()
 
 	key := highbits(dat[0])
-	var c = newBitmapContainer()
-	c.iadd(lowbits(dat[0]))
+	var c = *newBitmapContainer()
+
+	lb := lowbits(dat[0])
+	c.bitmap[lb/64] |= uint64(1) << (lb % 64)
+	card := 1
 
 	for _, x := range dat[1:] {
 		hb := highbits(x)
 		lb := lowbits(x)
 		if hb != key {
+			c.cardinality = card
+
 			var nc container
-			if c.getCardinality() < arrayDefaultMaxSize {
+			if card <= arrayDefaultMaxSize {
 				nc = c.toArrayContainer()
 			} else {
 				nc = c.clone()
@@ -998,18 +1003,19 @@ func BitmapOfSequentialDense(dat ...uint32) *Bitmap {
 			}
 
 			key = hb
+			card = 0
 		}
 
-		c.iadd(lb)
+		c.bitmap[lb/64] |= uint64(1) << (lb % 64)
+		card++
 	}
 
-	var nc container
-	if c.getCardinality() < arrayDefaultMaxSize {
-		nc = c.toArrayContainer()
-	} else {
-		nc = c
+	c.cardinality = card
+	var lc container = &c
+	if card <= arrayDefaultMaxSize {
+		lc = c.toArrayContainer()
 	}
-	rb.highlowcontainer.appendContainer(key, nc, false)
+	rb.highlowcontainer.appendContainer(key, lc, false)
 
 	return rb
 }
