@@ -973,6 +973,86 @@ func BitmapOf(dat ...uint32) *Bitmap {
 	return ans
 }
 
+func BitmapOfSequentialDense(dat ...uint32) *Bitmap {
+	rb := New()
+
+	key := highbits(dat[0])
+	var c = newBitmapContainer()
+	c.iadd(lowbits(dat[0]))
+
+	for _, x := range dat[1:] {
+		hb := highbits(x)
+		lb := lowbits(x)
+		if hb != key {
+			var nc container
+			if c.getCardinality() < arrayDefaultMaxSize {
+				nc = c.toArrayContainer()
+			} else {
+				nc = c.clone()
+			}
+			rb.highlowcontainer.appendContainer(key, nc, false)
+			c.cardinality = 0
+			// clear bits
+			for i := range c.bitmap {
+				c.bitmap[i] = 0
+			}
+
+			key = hb
+		}
+
+		c.iadd(lb)
+	}
+
+	var nc container
+	if c.getCardinality() < arrayDefaultMaxSize {
+		nc = c.toArrayContainer()
+	} else {
+		nc = c
+	}
+	rb.highlowcontainer.appendContainer(key, nc, false)
+
+	return rb
+}
+
+func BitmapOfSequentialSparse(dat ...uint32) *Bitmap {
+	rb := New()
+
+	c := make([]uint16, maxCapacity)
+	key := highbits(dat[0])
+	c[0] = lowbits(dat[0])
+	card := 1
+	for _, x := range dat[1:] {
+		hb := highbits(x)
+		lb := lowbits(x)
+		if hb != key {
+			var nc container = &arrayContainer{c[:card]}
+			if card > arrayDefaultMaxSize {
+				nc = nc.(*arrayContainer).toBitmapContainer()
+			} else {
+				nc = nc.clone()
+			}
+			rb.highlowcontainer.appendContainer(key, nc, false)
+			// clear bits
+			for i := 0; i < card; i++ {
+				c[i] = 0
+			}
+
+			card = 0
+			key = hb
+		}
+		c[card] = lb
+		card++
+	}
+
+	var nc container = &arrayContainer{c[:card:card]}
+	if card > arrayDefaultMaxSize {
+		nc = nc.(*arrayContainer).toBitmapContainer()
+	}
+	rb.highlowcontainer.appendContainer(key, nc, false)
+
+	return rb
+}
+
 // Flip negates the bits in the given range (i.e., [rangeStart,rangeEnd)), any integer present in this range and in the bitmap is removed,
 // and any integer present in the range and not in the bitmap is added.
 // The function uses 64-bit parameters even though a Bitmap stores 32-bit values because it is allowed and meaningful to use [0,uint64(0x100000000)) as a range

@@ -533,3 +533,63 @@ func BenchmarkXorLopsided(b *testing.B) {
 		s.Clone().Xor(x2)
 	}
 }
+
+func randomRecordSetUint32(count, max int) []uint32 {
+	h := make([]bool, max)
+	for i := 0; i < count; {
+		r := rand.Intn(max)
+		if !h[r] {
+			h[r] = true
+			i++
+		}
+	}
+	rows := make([]uint32, count)
+	i := 0
+	for r, ok := range h {
+		if ok {
+			rows[i] = uint32(r + 1)
+			i++
+		}
+	}
+	return rows
+}
+
+func BenchmarkBitmapOf(b *testing.B) {
+	// 1% density
+	count := 1000000
+	rrs := randomRecordSetUint32(count, 100000000)
+
+	var cardBaseline uint64
+	var cardDense uint64
+	var cardSparse uint64
+
+	b.Run("baseline", func(b *testing.B) {
+		var bm *Bitmap
+		for n := 0; n < b.N; n++ {
+			bm = BitmapOf(rrs...)
+		}
+		cardBaseline = bm.GetCardinality()
+	})
+
+	b.Run("dense", func(b *testing.B) {
+		var bm *Bitmap
+		for n := 0; n < b.N; n++ {
+			bm = BitmapOfSequentialDense(rrs...)
+		}
+		cardDense = bm.GetCardinality()
+	})
+
+	b.Run("sparse", func(b *testing.B) {
+		var bm *Bitmap
+		for n := 0; n < b.N; n++ {
+			bm = BitmapOfSequentialSparse(rrs...)
+		}
+
+		cardSparse = bm.GetCardinality()
+	})
+
+	if cardBaseline != cardDense || cardBaseline != cardSparse {
+		b.Fatalf("Cardinalities don't match: %d, %d, %d", cardBaseline, cardDense, cardSparse)
+	}
+
+}
