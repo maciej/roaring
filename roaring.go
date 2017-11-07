@@ -1033,7 +1033,8 @@ func BitmapOfSequentialSparse(dat ...uint32) *Bitmap {
 			}
 			rb.highlowcontainer.appendContainer(key, nc, false)
 			// clear bits
-			for i := 0; i < card; i++ {
+			// go should optimize it to a memset: https://codereview.appspot.com/137880043
+			for i := range c[:card] {
 				c[i] = 0
 			}
 
