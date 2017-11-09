@@ -984,8 +984,10 @@ func BitmapOfSequentialDense(dat ...uint32) *Bitmap {
 	card := 1
 
 	for _, x := range dat[1:] {
+		prevLb := lb
+
 		hb := highbits(x)
-		lb := lowbits(x)
+		lb = lowbits(x)
 		if hb != key {
 			c.cardinality = card
 
@@ -998,7 +1000,7 @@ func BitmapOfSequentialDense(dat ...uint32) *Bitmap {
 			rb.highlowcontainer.appendContainer(key, nc, false)
 			c.cardinality = 0
 			// clear bits
-			for i := range c.bitmap {
+			for i := range c.bitmap[:prevLb/64+1] {
 				c.bitmap[i] = 0
 			}
 
@@ -1048,11 +1050,6 @@ func BitmapOfSequentialSparse(dat ...uint32) *Bitmap {
 			}
 
 			rb.highlowcontainer.appendContainer(key, nc, false)
-			// clear bits
-			// go should optimize it to a memset: https://codereview.appspot.com/137880043
-			for i := range c[:card] {
-				c[i] = 0
-			}
 
 			card = 0
 			key = hb
