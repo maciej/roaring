@@ -3,6 +3,8 @@ package roaring
 import (
 	"container/heap"
 	"runtime"
+	"sort"
+	"sync"
 )
 
 var defaultWorkerCount = runtime.NumCPU()
@@ -67,6 +69,27 @@ func (h *bitmapContainerHeap) PopIncrementing() bitmapContainerKey {
 		heap.Pop(h)
 	}
 	return k
+}
+
+func (h *bitmapContainerHeap) nextFor(num, modulo int) (key uint16, container container) {
+	k := h.Peek()
+	key = k.key
+	container = k.container
+	bitmapLen := k.bitmap.highlowcontainer.size()
+
+	for nextIdx := k.idx + 1; nextIdx < bitmapLen; nextIdx++ {
+		if int(k.bitmap.highlowcontainer.keys[nextIdx])%modulo == num {
+			k.key = k.bitmap.highlowcontainer.keys[nextIdx]
+			k.container = k.bitmap.highlowcontainer.containers[nextIdx]
+			k.idx = nextIdx
+			(*h)[0] = k
+			heap.Fix(h, 0)
+			return
+		}
+	}
+
+	heap.Pop(h)
+	return
 }
 
 func (h *bitmapContainerHeap) PopNextContainers() multipleContainers {
@@ -247,6 +270,93 @@ func ParOr(parallelism int, bitmaps ...*Bitmap) *Bitmap {
 	close(expectedKeysChan)
 
 	return bitmap
+}
+
+func ParOr2(parallelism int, bitmaps ...*Bitmap) *Bitmap {
+	bitmapCount := len(bitmaps)
+	if bitmapCount == 0 {
+		return NewBitmap()
+	} else if bitmapCount == 1 {
+		return bitmaps[0].Clone()
+	}
+
+	if parallelism == 0 {
+		parallelism = defaultWorkerCount
+	}
+
+	wg := &sync.WaitGroup{}
+	wg.Add(parallelism)
+
+	keyedContainers := make([]keyedContainer, 0, 32)
+	keyedContainersMutex := &sync.Mutex{}
+
+	orFunc := func(workerNum int) {
+		var h bitmapContainerHeap = make([]bitmapContainerKey, 0, len(bitmaps))
+		for _, bitmap := range bitmaps {
+			for i := 0; i < bitmap.highlowcontainer.size(); i++ {
+				if int(bitmap.highlowcontainer.keys[i])%parallelism == workerNum {
+					key := bitmapContainerKey{
+						bitmap,
+						bitmap.highlowcontainer.containers[i],
+						bitmap.highlowcontainer.keys[i],
+						workerNum,
+					}
+					h = append(h, key)
+					break
+				}
+			}
+		}
+
+		heap.Init(&h)
+		for h.Len() > 0 {
+			key, c := h.nextFor(workerNum, parallelism)
+			if h.Len() > 0 && key == h.Peek().key {
+				_, next := h.nextFor(workerNum, parallelism)
+				c = toBitmapContainer(c).lazyOR(next)
+				for h.Len() > 0 && key == h.Peek().key {
+					_, next := h.nextFor(workerNum, parallelism)
+					c = c.lazyIOR(next)
+				}
+			}
+			kx := keyedContainer{
+				key,
+				c,
+				-1,
+			}
+
+			keyedContainersMutex.Lock()
+			keyedContainers = append(keyedContainers, kx)
+			keyedContainersMutex.Unlock()
+		}
+
+		wg.Done()
+	}
+
+	for i := 0; i < parallelism; i++ {
+		go orFunc(i)
+	}
+
+	wg.Wait()
+
+	sort.Slice(keyedContainers, func(i, j int) bool {
+		return keyedContainers[i].key < keyedContainers[j].key
+	})
+
+	b := &Bitmap{
+		roaringArray{
+			make([]uint16, 0, len(keyedContainers)),
+			make([]container, 0, len(keyedContainers)),
+			make([]bool, 0, len(keyedContainers)),
+			false,
+			nil,
+		},
+	}
+
+	for _, k := range keyedContainers {
+		b.highlowcontainer.appendContainer(k.key, k.container, false)
+	}
+
+	return b
 }
 
 // ParAnd computes the intersection (AND) of all provided bitmaps in parallel,
