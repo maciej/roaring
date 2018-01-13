@@ -1,7 +1,6 @@
 package roaring
 
 import (
-	"container/heap"
 	"runtime"
 	"sync"
 )
@@ -28,30 +27,60 @@ type keyedContainer struct {
 
 type bitmapContainerHeap []bitmapContainerKey
 
-func (h bitmapContainerHeap) Len() int           { return len(h) }
-func (h bitmapContainerHeap) Less(i, j int) bool { return h[i].key < h[j].key }
-func (h bitmapContainerHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
-
-func (h *bitmapContainerHeap) Push(x interface{}) {
-	// Push and Pop use pointer receivers because they modify the slice's length,
-	// not just its contents.
-	*h = append(*h, x.(bitmapContainerKey))
-}
-
-func (h *bitmapContainerHeap) Pop() interface{} {
-	old := *h
-	n := len(old)
-	x := old[n-1]
-	*h = old[0 : n-1]
-	return x
-}
-
-func (h bitmapContainerHeap) Peek() bitmapContainerKey {
+func (h bitmapContainerHeap) peek() bitmapContainerKey {
 	return h[0]
 }
 
+// fast heap
+func (h *bitmapContainerHeap) down(i int) {
+	size := len(*h)
+	ai := (*h)[i]
+	l := (i << 1) + 1
+	for l < size {
+		i = l
+		if l+1 < size {
+			if (*h)[l+1].key < (*h)[l].key {
+				i = l + 1
+			}
+		}
+		(*h)[(i-1)>>1] = (*h)[i]
+		l = (i << 1) + 1
+	}
+	p := (i - 1) >> 1
+	for (i > 0) && (ai.key < (*h)[p].key) {
+		(*h)[i] = (*h)[p]
+		i = p
+		p = (i - 1) >> 1
+	}
+	(*h)[i] = ai
+}
+
+func (h *bitmapContainerHeap) push(myval bitmapContainerKey) {
+	i := len(*h)
+	*h = append(*h, myval)
+	p := (i - 1) >> 1
+	for (i > 0) && (myval.key < (*h)[p].key) {
+		(*h)[i] = (*h)[p]
+		i = p
+		p = (i - 1) >> 1
+	}
+	(*h)[i] = myval
+}
+
+func (h *bitmapContainerHeap) pop() bitmapContainerKey {
+	ans := (*h)[0]
+	if len(*h) > 1 {
+		(*h)[0] = (*h)[len(*h)-1]
+		*h = (*h)[:len(*h)-1]
+		h.down(0)
+	} else {
+		*h = (*h)[:len(*h)-1]
+	}
+	return ans
+}
+
 func (h *bitmapContainerHeap) popIncrementing() (key uint16, container container) {
-	k := h.Peek()
+	k := h.peek()
 	key = k.key
 	container = k.bitmap.highlowcontainer.containers[k.idx]
 
@@ -63,23 +92,23 @@ func (h *bitmapContainerHeap) popIncrementing() (key uint16, container container
 			k.bitmap,
 		}
 		(*h)[0] = k
-		heap.Fix(h, 0)
+		h.down(0)
 	} else {
-		heap.Pop(h)
+		h.pop()
 	}
 
 	return
 }
 
 func (h *bitmapContainerHeap) Next(containers []container) multipleContainers {
-	if h.Len() == 0 {
+	if len(*h) == 0 {
 		return multipleContainers{}
 	}
 
 	key, container := h.popIncrementing()
 	containers = append(containers, container)
 
-	for h.Len() > 0 && key == h.Peek().key {
+	for len(*h) > 0 && key == h.peek().key {
 		_, container = h.popIncrementing()
 		containers = append(containers, container)
 	}
@@ -101,11 +130,9 @@ func newBitmapContainerHeap(bitmaps ...*Bitmap) bitmapContainerHeap {
 				0,
 				bitmap,
 			}
-			h = append(h, key)
+			h.push(key)
 		}
 	}
-
-	heap.Init(&h)
 
 	return h
 }
@@ -231,7 +258,7 @@ func ParOr(parallelism int, bitmaps ...*Bitmap) *Bitmap {
 	}
 
 	idx := 0
-	for h.Len() > 0 {
+	for len(h) > 0 {
 		ck := h.Next(pool.Get().([]container))
 		if len(ck.containers) == 1 {
 			resultChan <- keyedContainer{
@@ -318,7 +345,7 @@ func ParAnd(parallelism int, bitmaps ...*Bitmap) *Bitmap {
 	}
 
 	idx := 0
-	for h.Len() > 0 {
+	for len(h) > 0 {
 		ck := h.Next(pool.Get().([]container))
 		if len(ck.containers) == bitmapCount {
 			ck.idx = idx
