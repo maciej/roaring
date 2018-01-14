@@ -279,6 +279,12 @@ func ParAnd(parallelism int, bitmaps ...*Bitmap) *Bitmap {
 	resultChan := make(chan keyedContainer, 32)
 	expectedKeysChan := make(chan int)
 
+	pool := sync.Pool{
+		New: func() interface{} {
+			return make([]container, 0, len(bitmaps))
+		},
+	}
+
 	andFunc := func() {
 		// Assumes only structs with >=2 containers are passed
 		for input := range inputChan {
@@ -301,6 +307,7 @@ func ParAnd(parallelism int, bitmaps ...*Bitmap) *Bitmap {
 				input.idx,
 			}
 			resultChan <- kx
+			pool.Put(input.containers[:0])
 		}
 	}
 
@@ -312,11 +319,13 @@ func ParAnd(parallelism int, bitmaps ...*Bitmap) *Bitmap {
 
 	idx := 0
 	for h.Len() > 0 {
-		ck := h.Next(make([]container, 0, 4))
+		ck := h.Next(pool.Get().([]container))
 		if len(ck.containers) == bitmapCount {
 			ck.idx = idx
 			inputChan <- ck
 			idx++
+		} else {
+			pool.Put(ck.containers[:0])
 		}
 	}
 	expectedKeysChan <- idx
