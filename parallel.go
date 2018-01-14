@@ -209,8 +209,31 @@ func ParOr(parallelism int, bitmaps ...*Bitmap) *Bitmap {
 	orFunc := func() {
 		// Assumes only structs with >=2 containers are passed
 		for input := range inputChan {
-			c := toBitmapContainer(input.containers[0]).lazyOR(input.containers[1])
-			for _, next := range input.containers[2:] {
+
+			var c container
+			skipIdx := 0
+			for i, cc := range input.containers {
+				if cc.containerType() == bitmapContype {
+					c = cc
+					skipIdx = i
+					break
+				}
+			}
+
+			if c == nil {
+				c = toBitmapContainer(input.containers[0]).lazyOR(input.containers[1])
+			} else if skipIdx == 0 {
+				c = c.lazyOR(input.containers[1])
+			} else if skipIdx == 1 {
+				c = c.lazyOR(input.containers[0])
+			} else {
+				c = c.lazyOR(input.containers[0]).lazyIOR(input.containers[1])
+			}
+
+			for i, next := range input.containers[2:] {
+				if i+2 == skipIdx {
+					continue
+				}
 				c = c.lazyIOR(next)
 			}
 			c = repairAfterLazy(c)
