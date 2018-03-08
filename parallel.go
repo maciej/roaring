@@ -330,6 +330,111 @@ func ParAnd(parallelism int, bitmaps ...*Bitmap) *Bitmap {
 	return bitmap
 }
 
+func ParNaiveAnd(parallelism int, bitmaps ...*Bitmap) *Bitmap {
+	var lKey uint16 = 0
+	var hKey uint16 = MaxUint16
+
+	if len(bitmaps) == 0 {
+		return NewBitmap()
+	} else if len(bitmaps) == 1 {
+		return bitmaps[0]
+	}
+
+	for _, b := range bitmaps {
+		if b.IsEmpty() {
+			return NewBitmap()
+		}
+	}
+
+	for _, b := range bitmaps {
+		lKey = maxOfUint16(lKey, b.highlowcontainer.keys[0])
+		hKey = minOfUint16(hKey, b.highlowcontainer.keys[b.highlowcontainer.size()-1])
+	}
+
+	if lKey > hKey {
+		return NewBitmap()
+	}
+
+	keyRange := hKey - lKey
+
+	if parallelism == 0 {
+		parallelism = defaultWorkerCount
+	}
+
+	chunkCount := minOfInt(parallelism*8, int(keyRange))
+	chunkSize := int(keyRange) / chunkCount
+	if chunkSize%chunkCount > 0 {
+		chunkCount++
+	}
+
+	chunks := make([]*roaringArray, chunkCount)
+
+	chunkSpecChan := make(chan parChunkSpec, minOfInt(maxOfInt(64, 2*parallelism), int(chunkCount)))
+	chunkChan := make(chan parChunk, minOfInt(32, int(chunkCount)))
+
+	andFunc := func() {
+		for spec := range chunkSpecChan {
+			ra := andOnRange(&bitmaps[0].highlowcontainer, &bitmaps[1].highlowcontainer, spec.start, spec.end)
+			for _, b := range bitmaps[2:] {
+				ra = iandOnRange(ra, &b.highlowcontainer, spec.start, spec.end)
+				if ra.size() == 0 {
+					break
+				}
+			}
+
+			chunkChan <- parChunk{ra, spec.idx}
+		}
+	}
+
+	for i := 0; i < parallelism; i++ {
+		go andFunc()
+	}
+
+	go func() {
+		for i := 0; i < chunkCount; i++ {
+			spec := parChunkSpec{
+				start: uint16(int(lKey) + i*chunkSize),
+				end:   uint16(minOfInt((i+1)*chunkSize-1+int(lKey), int(hKey))),
+				idx:   int(i),
+			}
+			chunkSpecChan <- spec
+		}
+	}()
+
+	chunksRemaining := chunkCount
+	for chunk := range chunkChan {
+		chunks[chunk.idx] = chunk.ra
+		chunksRemaining--
+		if chunksRemaining == 0 {
+			break
+		}
+	}
+	close(chunkChan)
+	close(chunkSpecChan)
+
+	containerCount := 0
+	for _, chunk := range chunks {
+		containerCount += chunk.size()
+	}
+	result := Bitmap{
+		roaringArray{
+			containers:      make([]container, containerCount),
+			keys:            make([]uint16, containerCount),
+			needCopyOnWrite: make([]bool, containerCount),
+		},
+	}
+
+	resultOffset := 0
+	for _, chunk := range chunks {
+		copy(result.highlowcontainer.containers[resultOffset:], chunk.containers)
+		copy(result.highlowcontainer.keys[resultOffset:], chunk.keys)
+		copy(result.highlowcontainer.needCopyOnWrite[resultOffset:], chunk.needCopyOnWrite)
+		resultOffset += chunk.size()
+	}
+
+	return &result
+}
+
 func ParNaiveOr(parallelism int, bitmaps ...*Bitmap) *Bitmap {
 	var lKey uint16 = MaxUint16
 	var hKey uint16 = 0
@@ -588,5 +693,106 @@ func lazyIOrOnRange(ra1, ra2 *roaringArray, start, last uint16) *roaringArray {
 			key2 = ra2.getKeyAtIndex(idx2)
 		}
 	}
+	return ra1
+}
+
+func andOnRange(ra1, ra2 *roaringArray, start, last uint16) *roaringArray {
+	answer := newRoaringArray()
+	length1 := ra1.size()
+	length2 := ra2.size()
+	idx1 := parNaiveStartAt(ra1, start, last)
+	idx2 := parNaiveStartAt(ra2, start, last)
+
+main:
+	for idx1 < length1 && idx2 < length2 {
+		key1 := ra1.getKeyAtIndex(idx1)
+		key2 := ra2.getKeyAtIndex(idx2)
+		for {
+			if key1 > last || key2 > last {
+				break main
+			}
+
+			if key1 == key2 {
+				c := ra1.getContainerAtIndex(idx1)
+				c = c.and(ra2.getContainerAtIndex(idx2))
+
+				if c.getCardinality() > 0 {
+					answer.appendContainer(key1, c, false)
+				}
+				idx1++
+				idx2++
+				if (idx1 == length1) || (idx2 == length2) {
+					break main
+				}
+				key1 = ra1.getKeyAtIndex(idx1)
+				key2 = ra2.getKeyAtIndex(idx2)
+			} else if key1 < key2 {
+				idx1 = ra1.advanceUntil(key2, idx1)
+				if idx1 == length1 {
+					break main
+				}
+				key1 = ra1.getKeyAtIndex(idx1)
+			} else { // key1 > key2
+				idx2 = ra2.advanceUntil(key1, idx2)
+				if idx2 == length2 {
+					break main
+				}
+				key2 = ra2.getKeyAtIndex(idx2)
+			}
+		}
+	}
+	return answer
+}
+
+func iandOnRange(ra1, ra2 *roaringArray, start, last uint16) *roaringArray {
+	intersectionsize := 0
+	length1 := ra1.size()
+	length2 := ra2.size()
+
+	idx1 := 0
+	idx2 := parNaiveStartAt(ra2, start, last)
+
+main:
+	for idx1 < length1 && idx2 < length2 {
+		key1 := ra1.getKeyAtIndex(idx1)
+		key2 := ra2.getKeyAtIndex(idx2)
+		for {
+			if key1 > last || key2 > last {
+				break main
+			}
+
+			if key1 == key2 {
+				c1 := ra1.getWritableContainerAtIndex(idx1)
+				c2 := ra2.getContainerAtIndex(idx2)
+				intersection := c1.iand(c2)
+				if intersection.getCardinality() > 0 {
+					ra1.replaceKeyAndContainerAtIndex(intersectionsize, key1, intersection, false)
+					intersectionsize++
+				}
+				idx1++
+				idx2++
+				if (idx1 == length1) || (idx2 == length2) {
+					break main
+				}
+				key1 = ra1.getKeyAtIndex(idx1)
+				key2 = ra2.getKeyAtIndex(idx2)
+			} else if key1 < key2 {
+				idx1 = ra1.advanceUntil(key2, idx1)
+				if idx1 == length1 {
+					break main
+				}
+				key1 = ra1.getKeyAtIndex(idx1)
+			} else { //key1 > key2
+				idx2 = ra2.advanceUntil(key1, idx2)
+				if idx2 == length2 {
+					break main
+				}
+				key2 = ra2.getKeyAtIndex(idx2)
+			}
+		}
+	}
+
+	ra1.resize(intersectionsize)
+
 	return ra1
 }
